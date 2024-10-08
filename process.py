@@ -127,17 +127,8 @@ def main():
     args = parser.parse_args()
     cfg = configparser.get_config(file_name=args.config)
 
-    # ================================= #
-    # grits.yaml
-    # ---------------------------------
-    # T=16, To=2, Ta=8
-    # |o|o|
-    # | |a|a|a|a|a|a|a|a|
-    # | |p|p|p|p|p|p|p|p|p|p|p|p|p|p|p|p|
-    # ================================= #
-
     # ========================================= #
-    # grits2.yaml
+    # grits.yaml
     # ---------------------------------
     # T=16, To=5, Ta=8
     # |o|o|o|o|o|
@@ -194,7 +185,7 @@ def main():
             ee_pose_rotation = rotation_transformer.forward(ee_pose[:, 3:])
             ee_pose_6d = np.concatenate((ee_pose_position, ee_pose_rotation), -1) # [:,9]
 
-            # add 1 frame before first frame
+            # add To-1 frame before first frame
             To = cfg.n_obs_steps
             for _ in range(To-1):
                 rgb_front = np.concatenate((np.expand_dims(rgb_front[0], 0), rgb_front), 0)
@@ -226,20 +217,11 @@ def main():
                     depth_PIL = depth_PIL / np.max(depth_PIL)
                     depth_front_tt = depth_transform(Image.fromarray(depth_PIL))
                     # concat
-                    ob_front_tensor.append(torch.cat((rgb_front_tt, depth_front_tt), 0))
-
-                    # rgb_front_tt = rgb_transform(Image.fromarray(np.uint8(rgb_front_tslice[tt])).convert('RGB'))
-                    # # depth_front_tt = depth_transform(Image.fromarray(np.uint8(depth_front_tslice[tt]), 'L'))
-                    # ob_front_tensor.append(torch.cat((rgb_front_tt, depth_front_tt), 0))
-                    # rgb_ee_tt = rgb_transform(Image.fromarray(np.uint8(rgb_ee_tslice[tt])).convert('RGB'))
-                    # # depth_ee_tt = depth_transform(Image.fromarray(np.uint8(depth_ee_tslice[tt]), 'L'))
-                    # ob_ee_tensor.append(torch.cat((rgb_ee_tt, depth_ee_tt), 0))
-
-                ee_6d_tensor = torch.from_numpy(ee_6d_tslice_normalize) # (16, 9)
+                    ob_front_tensor.append(torch.cat((rgb_front_tt, depth_front_tt), 0))            
                 
                 # save tensor
+                ee_6d_tensor = torch.from_numpy(ee_6d_tslice_normalize) # (16, 9)
                 ob_front_tensor = torch.stack(ob_front_tensor, dim=0)
-
                 assert ob_front_tensor.shape[0]==T
                 assert ee_6d_tensor.shape[0]==T
                 torch.save(ob_front_tensor, out_dir+'/ob_front_{}.pt'.format(str(num_all).zfill(5)))
