@@ -3,7 +3,6 @@ from torch.utils.data.dataset import Dataset
 import glob
 import torch
 import torch.nn as nn
-import torchvision.models as models
 from torch.utils.data import DataLoader
 import torch.optim as optim
 from torch.optim import lr_scheduler
@@ -18,7 +17,6 @@ from model import DiffusionPolicy, EMAModel, SingleObEncoder
 from argparse import ArgumentParser
 import copy
 from torch.utils.tensorboard import SummaryWriter
-import torchinfo
 
 
 class FoodDataset(Dataset):
@@ -118,9 +116,6 @@ def train(cfg,
 
         # add to tensorboard
         writer.add_scalar('val MSE', val_epoch_loss, epoch+1)
-            
-        # uodate
-        # scheduler.step(val_epoch_loss)
 
     time_elapsed = time.time() - since
     print('Training complete in {:.0f}m {:.0f}s'.format(
@@ -134,7 +129,6 @@ def train(cfg,
                 'scheduler_state_dict': scheduler.state_dict(),
                 'loss': loss,
                 }, os.path.join(save_dir, 'epoch={}.pth'.format(epoch+1)))
-
 
 class Print_Logger(object):
     def __init__(self, filename="Default.log"):
