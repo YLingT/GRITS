@@ -18,7 +18,6 @@ import pytorch3d.transforms as pt
 import functools
 
 
-
 class RotationTransformer:
     valid_reps = [
         'axis_angle',
@@ -145,8 +144,8 @@ class DiffusionPolicy(nn.Module):
             noise_scheduler,
             #================#
             action_dim=9,
-            obs_feature_dim=512, # 512+32
-            input_dim=521
+            obs_feature_dim=512+32, 
+            input_dim=512+32+9
         ):
         super().__init__()
 
@@ -245,8 +244,9 @@ class DiffusionPolicy(nn.Module):
     def local_goal_objective(self, traj, goal_pose):
 
         # transfer generated ee traj to spoon traj
-        unnorm_traj = _denormalize(traj, self.input_max, self.input_min, self.input_mean)
-        spoon_traj = _normalize(from_ee_to_spoon(unnorm_traj), self.input_max, self.input_min, self.input_mean)
+        # unnorm_traj = _denormalize(traj, self.input_max, self.input_min, self.input_mean)
+        # spoon_traj = _normalize(from_ee_to_spoon(unnorm_traj), self.input_max, self.input_min, self.input_mean)
+
         action_dim = 2
         goal_pos_xy = goal_pose[:, :action_dim]
         dist = torch.norm(traj[:, :, :action_dim] - goal_pos_xy, dim=-1) # [1, 16]
@@ -255,6 +255,25 @@ class DiffusionPolicy(nn.Module):
         loss_weighting = F.softmin(dist, dim=-1)
         loss = loss_weighting * torch.sum((traj[:, :, :action_dim] - goal_pos_xy)**2, dim=-1)
         goal_loss = torch.mean(loss, dim=-1)
+        print("goal_loss= ", goal_loss)
+        return torch.autograd.grad(goal_loss, traj)[0]
+    
+    def global_goal_objective(self, traj, goal_pose):
+
+        # transfer generated ee traj to spoon traj
+        # unnorm_traj = _denormalize(traj, self.input_max, self.input_min, self.input_mean)
+        # spoon_traj = _normalize(from_ee_to_spoon(unnorm_traj), self.input_max, self.input_min, self.input_mean)
+
+        action_dim = 2
+        goal_pos_xy = goal_pose[:, :action_dim]
+
+        # global weight
+        threshold = 0.04
+        d_current = torch.norm(traj[:, -1, :action_dim] - goal_pos_xy, dim=-1)
+        u = torch.min(torch.tensor(1.0, device=self.device), (d_current - threshold) / d_current)
+        d_goal = u * d_current
+        d_progress = torch.norm(traj[:, 0, :action_dim] - goal_pos_xy, dim=-1) - torch.norm(traj[:, -1, :action_dim] - goal_pos_xy, dim=-1)
+        goal_loss = F.relu(d_goal - torch.mean(d_progress))
         return torch.autograd.grad(goal_loss, traj)[0]
     
     def spillage_objective(self, obs_in, traj, spillage_classifier):  
@@ -278,9 +297,8 @@ class DiffusionPolicy(nn.Module):
         return 0
 
     def conditional_sample(self, 
-            condition_data, condition_mask,
-            global_cond=None,
-            goal_position=None,
+            condition_data, condition_mask, 
+            global_cond, goal_position,
             spillage_classifier=None,
             obs_in=None,
             start_guidance=True,
@@ -295,86 +313,25 @@ class DiffusionPolicy(nn.Module):
             dtype=condition_data.dtype,
             device=condition_data.device,
             generator=generator)
-        traj_guided = traj.clone().detach().requires_grad_(True)
     
         # set step values
         scheduler.set_timesteps(self.num_inference_steps)
-
-        if start_guidance:
-
-            # traj.requires_grad=True
-            traj_guided.requires_grad=True
-            for t in scheduler.timesteps:
-                traj[condition_mask] = condition_data[condition_mask]
-                traj_guided[condition_mask] = condition_data[condition_mask]
-
-                model_output = model(traj, t, global_cond=global_cond)
-                model_output_guided = model(traj_guided, t, global_cond=global_cond)
-
-                # Compute gradient
-                with torch.enable_grad():
-                    model_output_guided = model_output_guided.detach().requires_grad_(True)
-                    goal_gradient = self.local_goal_objective(model_output_guided, goal_position) 
-
-                # update
-                model_output_guided[..., :2] -= 2. * goal_gradient[..., :2]
-                # model_output[..., 0:2] -= self.guided_weight * self.guided_alpha * goal_gradient
-                # # model_output -= self.guided_weight * (self.guided_beta * spillage_gradient + self.guided_gamma * amount_gradient)
-                # # model_output -= self.guided_weight * guided_grad * (1 - scheduler.alphas_cumprod[t]).sqrt()
-
-                traj = scheduler.step(
-                    model_output, t, traj, 
-                    generator=generator
-                    ).prev_sample       
-                
-                traj_guided = scheduler.step(
-                    model_output_guided, t, traj, 
-                    generator=generator
-                    ).prev_sample
-
-            # optimization
-            # goal_pos_xy = goal_position[:, :2]
-            # dist = torch.norm(traj[:, :, :2] - goal_pos_xy, dim=-1)
-            # print("dist= ", dist)
-            # dist_in_threshold = torch.where(dist<0.4)
-            # if len(dist_in_threshold[0])>0:
-            #     self.trigger = True # trigger local weight
-
-            # for _ in range(32):
-            #     with torch.enable_grad():
-            #         traj = traj.detach().requires_grad_(True)
-            #         traj = traj.to("cuda:0")
-            #         goal_position = goal_position.to("cuda:0")
-            #         if self.trigger:
-            #             grad_weight = 2.
-            #             guided_grad = self.local_goal_objective(traj, goal_position)
-            #             print("Local.")
-            #         else:
-            #             grad_weight = 0.1
-            #             guided_grad = self.global_goal_objective(traj, goal_position)
-            #             print("Global.")
-
-            #         traj_clone = traj.clone()
-            #         traj_clone[..., :2] -= grad_weight * guided_grad[..., :2]
-            #         traj = traj_clone
-
-        else:     
-            for t in scheduler.timesteps:
-                # 1. apply conditioning
-                traj[condition_mask] = condition_data[condition_mask]
-                # 2. predict model output
-                model_output = model(traj, t, global_cond=global_cond)
-                # 3. compute previous image: x_t -> x_t-1
-                traj = scheduler.step(
-                    model_output, t, traj, 
-                    generator=generator
-                    ).prev_sample
+  
+        for t in scheduler.timesteps:
+            # 1. apply conditioning
+            traj[condition_mask] = condition_data[condition_mask]
+            # 2. predict model output
+            model_output = model(traj, t, global_cond=global_cond)
+            # 3. compute previous image: x_t -> x_t-1
+            traj = scheduler.step(
+                model_output, t, traj, 
+                generator=generator
+                ).prev_sample
 
         # finally make sure conditioning is enforced
-        traj[condition_mask] = condition_data[condition_mask]  
-        traj_guided[condition_mask] = condition_data[condition_mask]      
+        traj[condition_mask] = condition_data[condition_mask]        
 
-        return traj, traj_guided
+        return traj
     
     def predict_action(self, inputs):
 
@@ -382,20 +339,15 @@ class DiffusionPolicy(nn.Module):
 
         # condition through global feature
         obs_in = obs[:,:self.n_obs_steps,...]
-        # ee_in = ee_pose[:,:self.n_obs_steps,...]
-        # obs_features = self.obs_encoder((obs_in, ee_in))
-        # # obs_features = self.obs_encoder(obs_in.reshape(-1,*obs.shape[2:]),
-        # #                                 ee_in.reshape(-1, *ee_pose.shape[2:]))
-        # global_cond = obs_features.reshape(obs.shape[0], -1)
-
-        obs_features = self.obs_encoder(obs_in.reshape(-1,*obs.shape[2:]))
+        ee_in = ee_pose[:,:self.n_obs_steps,...]
+        obs_features = self.obs_encoder((obs_in, ee_in))
         global_cond = obs_features.reshape(obs.shape[0], -1)
 
         cond_data = torch.zeros(size=(obs.shape[0], self.horizon, self.action_dim), device=self.device, dtype=torch.float32)
         cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
 
         # run sampling
-        nsample, nsample_guided = self.conditional_sample(
+        nsample = self.conditional_sample(
             cond_data, 
             cond_mask,
             global_cond=global_cond,
@@ -405,9 +357,32 @@ class DiffusionPolicy(nn.Module):
             start_guidance=start_guidance
             )
         
+        # optimization
+        traj = _denormalize(nsample, self.input_max, self.input_min, self.input_mean)
+        if start_guidance:
+            goal_pos_xy = goal_position[:, :2]
+            dist = torch.norm(traj[:, :, :2] - goal_pos_xy, dim=-1)
+            print("dist= ", dist)
+            dist_in_threshold = torch.where(dist<0.06)
+            if len(dist_in_threshold[0])>0:
+                self.trigger = True # trigger local weight
+            for _ in range(32):
+                with torch.enable_grad():
+                    traj = traj.detach().requires_grad_(True)
+                    traj = traj.to("cuda:0")
+                    goal_position = goal_position.to("cuda:0")
+                    if self.trigger:
+                        grad_weight = 3.
+                        guided_grad = self.local_goal_objective(traj, goal_position)
+                        print("Local.")
+                        traj_clone = traj.clone()
+                        traj_clone[..., :2] -= grad_weight * guided_grad[..., :2]
+                        traj = traj_clone
+        action_pred = traj[...,:self.action_dim]
+            
         # unnormalize prediction
-        naction_pred = nsample[...,:self.action_dim]
-        action_pred = _denormalize(naction_pred, self.input_max, self.input_min, self.input_mean)
+        # naction_pred = nsample[...,:self.action_dim]
+        # action_pred = _denormalize(naction_pred, self.input_max, self.input_min, self.input_mean)
 
         # get action
         start = self.n_obs_steps - 1
@@ -426,9 +401,7 @@ def get_translation_matrix(x, y, z):
     ])
 
 from pytorch3d.transforms import rotation_6d_to_matrix, matrix_to_rotation_6d
-def from_ee_to_spoon(ee_traj):
-    
-    # T_spoon_to_center = get_translation_matrix(0, -0.1, 0.15) # 15cm
+def from_ee_to_spoon(ee_traj):    
     T_spoon_to_center = get_translation_matrix(0.03, 0, 0.17)
     ee_traj = ee_traj.squeeze(0) # (H, 9)
     spoon_traj = torch.zeros_like(ee_traj) # (H, 9)
@@ -441,31 +414,21 @@ def from_ee_to_spoon(ee_traj):
         spoon_pose = torch.mm(ee_pose, T_spoon_to_center)
         spoon_traj[i, 0:3] = spoon_pose[0:3, 3]
         spoon_traj[i, 3:] = matrix_to_rotation_6d(spoon_pose[0:3, 0:3])
-
     return spoon_traj.unsqueeze(0) # (B, H, 9)
 
 def _normalize(data, input_max, input_min, input_mean):
     ranges = input_max - input_min
-    data = data.squeeze(0)
-    data_normalize = torch.zeros_like(data)
-    if data.shape[-1]>3:
-        for i in range(3):
-            if ranges[i] < 1e-4:
-                # If variance is small, shift to zero-mean without scaling
-                data_normalize[:, i] = data[:, i] - input_mean[i]
-            else:
-                # Scale to [-1, 1] range
-                data_normalize[:, i] = -1 + 2 * (data[:, i] - input_min[i]) / ranges[i]   
-        data_normalize[:, 3:] = data[:, 3:]
-    else:
-        for i in range(3):
-            if ranges[i] < 1e-4:
-                # If variance is small, shift to zero-mean without scaling
-                data_normalize[:, i] = data[:, i] - input_mean[i]
-            else:
-                # Scale to [-1, 1] range
-                data_normalize[i] = -1 + 2 * (data[i] - input_min[i]) / ranges[i]
-    return data_normalize.unsqueeze(0)
+    data = data.squeeze(0) # [1, 9] -> [9]
+    data_normalize = torch.zeros_like(data) 
+    for i in range(3):
+        if ranges[i] < 1e-4:
+            # If variance is small, shift to zero-mean without scaling
+            data_normalize[i] = data[i] - input_mean[i]
+        else:
+            # Scale to [-1, 1] range
+            data_normalize[i] = -1 + 2 * (data[i] - input_min[i]) / ranges[i]
+    data_normalize[:, 3:] = data[:, 3:]
+    return data_normalize.unsqueeze(0) # [9] -> [1, 9]
 
 def _denormalize(data, input_max, input_min, input_mean):
     ranges = input_max - input_min
