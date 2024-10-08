@@ -242,32 +242,6 @@ class DiffusionPolicy(nn.Module):
         return loss
 
     # ========= inference  ============
-    # def goal_objective(self, traj, goal_pos):
-
-    #     # transfer generated ee traj to spoon traj
-    #     unnorm_traj = _denormalize(traj, self.input_max, self.input_min, self.input_mean)
-    #     spoon_traj = _normalize(from_ee_to_spoon(unnorm_traj), self.input_max, self.input_min, self.input_mean)
-
-    #     goal_pos_xy=goal_pos[:, 0:2]
-    #     dist = torch.norm(spoon_traj[:, :, 0:2] - goal_pos_xy[:, None], dim=-1) # (B, 16, 3) - (B, 1, 3) = (B, 16)
-
-    #     if self.goal_guided_mode=='sum_all_frame': # naive method
-    #         loss = dist.sum()
-
-    #     elif self.goal_guided_mode=='sum_all_frame_exp': # Scene-Diffuser
-    #         loss = torch.exp(1 / dist.clamp(min=0.01)).sum()
-
-    #     elif self.goal_guided_mode=="sum_all_frame_weighted": # Trace and pace
-    #         loss_weighting = F.softmin(dist, dim=-1)
-    #         loss = loss_weighting * torch.sum((spoon_traj[:, :, 0:2] - goal_pos_xy[:, None])**2, dim=-1)
-    #         loss = torch.mean(loss, dim=-1)
-
-    #     # calculate gradient
-    #     guided_grad = torch.autograd.grad(loss, traj)[0]
-    #     goal_gradient = torch.clip(guided_grad[..., 0:2], min=-0.2, max=0.2)
-
-    #     return goal_gradient
-
     def local_goal_objective(self, traj, goal_pose):
 
         # transfer generated ee traj to spoon traj
@@ -281,25 +255,6 @@ class DiffusionPolicy(nn.Module):
         loss_weighting = F.softmin(dist, dim=-1)
         loss = loss_weighting * torch.sum((traj[:, :, :action_dim] - goal_pos_xy)**2, dim=-1)
         goal_loss = torch.mean(loss, dim=-1)
-        print("goal_loss= ", goal_loss)
-        return torch.autograd.grad(goal_loss, traj)[0]
-    
-    def global_goal_objective(self, traj, goal_pose):
-
-        # transfer generated ee traj to spoon traj
-        unnorm_traj = _denormalize(traj, self.input_max, self.input_min, self.input_mean)
-        spoon_traj = _normalize(from_ee_to_spoon(unnorm_traj), self.input_max, self.input_min, self.input_mean)
-        action_dim = 2
-        goal_pos_xy = goal_pose[:, :action_dim]
-
-        # global weight
-        threshold = 0.4
-        d_current = torch.norm(spoon_traj[:, -1, :action_dim] - goal_pos_xy, dim=-1)
-        u = torch.min(torch.tensor(1.0, device=self.device), (d_current - threshold) / d_current)
-        d_goal = u * d_current
-        d_progress = torch.norm(spoon_traj[:, 0, :action_dim] - goal_pos_xy, dim=-1) - torch.norm(spoon_traj[:, -1, :action_dim] - goal_pos_xy, dim=-1)
-        goal_loss = F.relu(d_goal - torch.mean(d_progress))
-        print("goal_loss= ", goal_loss)
         return torch.autograd.grad(goal_loss, traj)[0]
     
     def spillage_objective(self, obs_in, traj, spillage_classifier):  
@@ -424,10 +379,6 @@ class DiffusionPolicy(nn.Module):
     def predict_action(self, inputs):
 
         obs, ee_pose, goal_position, spillage_classifier, start_guidance = inputs
-        # obs, ee_pose = inputs
-
-        # goal pose normalize
-        # goal_position = _normalize(goal_position, self.input_max, self.input_min, self.input_mean)
 
         # condition through global feature
         obs_in = obs[:,:self.n_obs_steps,...]
@@ -457,16 +408,13 @@ class DiffusionPolicy(nn.Module):
         # unnormalize prediction
         naction_pred = nsample[...,:self.action_dim]
         action_pred = _denormalize(naction_pred, self.input_max, self.input_min, self.input_mean)
-        naction_pred_guided = nsample_guided[...,:self.action_dim]
-        action_pred_guided = _denormalize(naction_pred_guided, self.input_max, self.input_min, self.input_mean)
 
         # get action
         start = self.n_obs_steps - 1
         end = start + self.n_action_steps
         action = action_pred[:,start:end]
 
-        # return action, action_pred
-        return action_pred, action_pred_guided
+        return action, action_pred
 
 # ====================================================================================================================================
 def get_translation_matrix(x, y, z):
